@@ -120,9 +120,7 @@ export interface ForgetHostServices {
   searchMessagePassages?: (
     query: string,
     limit?: number,
-  ) => Promise<
-    Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>
-  >;
+  ) => Promise<Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>>;
   /**
    * List ALL message passages (unfiltered) — enables self-sufficient
    * timerange suppression by createdAt window without BM25 probing.
@@ -144,6 +142,15 @@ export interface ForgetHostServices {
    * callback so ForgetService stays decoupled from SQLite internals.
    */
   listNonThreadDocs?: () => Promise<Array<{ anchor: string; summary: string | null }>>;
+  /** List thread summary docs (anchor + summary) for the fail-closed
+   *  rebuilt-summary verification. */
+  listThreadSummaries?: () => Promise<Array<{ anchor: string; summary: string | null }>>;
+  /**
+   * Blank a thread summary (summary='', fail-closed) — the same semantics
+   * suppressMessagePassage uses when it cannot prove a rebuilt summary
+   * clean. Wired to a targeted UPDATE on evidence_docs.
+   */
+  blankThreadSummary?: (anchor: string) => Promise<void>;
 }
 
 const THREAD_KINDS = new Set(['thread', 'session', 'discussion', 'diary']);
@@ -318,7 +325,12 @@ export class ForgetService {
     const runPass = async (): Promise<number> => {
       const seen = new Set<string>();
       const listAll = this.services.listMessagePassages;
-      let candidates: Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>;
+      let candidates: Array<{
+        threadId: string;
+        messageId: string;
+        createdAt?: string | null;
+        content?: string | null;
+      }>;
       if (isTimerange && listAll) {
         candidates = (await listAll()).filter((p) => dateInWindow(p.createdAt));
       } else {
@@ -369,6 +381,40 @@ export class ForgetService {
       if (!isTimerange && found === 0) break;
     }
 
+    // Timerange ack-capture: the assistant's confirmation ("I've forgotten
+    // the December events including the Penang trip") is timestamped AFTER
+    // the window, so the date filter spares it — yet it re-introduces the
+    // forgotten topic words into every answer (leaky refusal, clowder_lite5d).
+    // After the window pass, run probe-based passes with NO date filter:
+    // any passage matching the request's own wording is a reference to the
+    // forgotten content and goes too.
+    if (isTimerange) {
+      const probes = (request.targets ?? []).flatMap(multiProbes);
+      for (let round = 0; round < RESIDUAL_MAX_ROUNDS; round += 1) {
+        const seen = new Set<string>();
+        const pairs: Array<{ threadId: string; messageId: string }> = [];
+        for (const probe of probes) {
+          for (const hit of await searchPassages(probe, 20)) {
+            const key = `${hit.threadId}/${hit.messageId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            pairs.push({ threadId: hit.threadId, messageId: hit.messageId });
+            for (const w of contentWords(hit.content ?? '')) suppressedWords.add(w);
+          }
+        }
+        if (pairs.length === 0) break;
+        for (const pair of pairs) {
+          await suppress(pair.threadId, pair.messageId);
+          details.push({
+            anchor: `thread-${pair.threadId}#msg-${pair.messageId}`,
+            kind: 'message',
+            method: 'index',
+          });
+          removed += 1;
+        }
+      }
+    }
+
     // Derived-representation sweep (content-exact): consolidated inferences
     // and session summaries written BEFORE the forget restate the forgotten
     // facts. A doc is deleted ONLY when its own substantive content is (nearly)
@@ -403,6 +449,29 @@ export class ForgetService {
         if (sweptAnchors.length > 0) {
           await this.services.dropEdgesForAnchors?.(sweptAnchors);
           await this.services.clearConsumptionSignals?.(sweptAnchors);
+        }
+      }
+    }
+
+    // Thread-summary verification: the suppression machinery rebuilds thread
+    // summaries from NON-suppressed messages, but variant-wording messages
+    // that escaped matching can re-introduce forgotten content words into
+    // the rebuilt summary. Fail closed the same way suppressMessagePassage
+    // does: if a rebuilt thread summary still carries seed words, blank it
+    // (summary='' — the fail-closed semantics the suppression machinery
+    // itself uses when it cannot prove a summary clean).
+    if (suppressedWords.size > 0 && this.services.blankThreadSummary) {
+      const threadDocs = (await this.services.listNonThreadDocs?.()) ?? [];
+      void threadDocs;
+      const threadRows = await this.services.listThreadSummaries?.();
+      if (threadRows) {
+        for (const row of threadRows) {
+          if (!row.summary || row.summary.length < 20) continue;
+          const docWords = [...contentWords(row.summary)];
+          const covered = docWords.filter((w) => suppressedWords.has(w)).length;
+          if (docWords.length > 0 && covered / docWords.length >= DERIVED_DOC_COVERAGE_THRESHOLD) {
+            await this.services.blankThreadSummary(row.anchor);
+          }
         }
       }
     }
