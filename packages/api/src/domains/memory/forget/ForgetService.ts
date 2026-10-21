@@ -57,6 +57,25 @@ export const FRESH_WRITE_GUARD_MS = 10 * 60 * 1000;
 /** Maximum residual-verification rounds after the initial deletion. */
 export const RESIDUAL_MAX_ROUNDS = 2;
 
+/**
+ * Derived-doc sweep: a non-thread doc is deleted only when at least this
+ * fraction of ITS OWN substantive content words is covered by the forget's
+ * seed words (suppressed passage content, falling back to the request
+ * targets). Conservative by design — mixed docs (forgotten + preserved
+ * facts) stay, so the sweep can never produce the collateral PR damage
+ * that the fuzzy BM25 sweep did (clowder_lite5b). The 0.35 floor absorbs
+ * LLM paraphrase noise (manages/daily-style abstraction words in derived
+ * summaries count against coverage).
+ */
+export const DERIVED_DOC_COVERAGE_THRESHOLD = 0.35;
+
+function contentWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+}
+
 export type ForgetScope = 'facts' | 'topic' | 'timerange';
 export type EvidenceScope = 'threads' | 'docs' | 'all';
 
@@ -94,13 +113,16 @@ export interface ForgetHostServices {
   retireSourceFile?: (sourcePath: string) => Promise<void>;
   /**
    * Message-level passage search for the threads scope. Returns thread/
-   * message coordinate pairs whose content matches the query. Wired to the
-   * concrete store's searchPassages by the host assembly.
+   * message coordinate pairs (plus the passage content for exact-match
+   * derived-doc sweeps). Wired to the concrete store's searchPassages by
+   * the host assembly.
    */
   searchMessagePassages?: (
     query: string,
     limit?: number,
-  ) => Promise<Array<{ threadId: string; messageId: string; createdAt?: string | null }>>;
+  ) => Promise<
+    Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>
+  >;
   /**
    * Permanently suppress one message from the thread index (hard forget):
    * removes the passage + vectors, commits the suppression tombstone, and
@@ -109,6 +131,12 @@ export interface ForgetHostServices {
    * finalizeMessagePassageSuppression pair.
    */
   suppressMessage?: (threadId: string, messageId: string) => Promise<void>;
+  /**
+   * List non-thread doc entries (anchor + summary) for the derived-doc
+   * content-exact sweep. Wired to the concrete store's table; kept as a
+   * callback so ForgetService stays decoupled from SQLite internals.
+   */
+  listNonThreadDocs?: () => Promise<Array<{ anchor: string; summary: string | null }>>;
 }
 
 const THREAD_KINDS = new Set(['thread', 'session', 'discussion', 'diary']);
@@ -256,6 +284,10 @@ export class ForgetService {
     const details: ForgetResult['details'] = [];
     let removed = 0;
     let protectedCount = 0;
+    // Distinctive content words from every suppressed passage — the exact-
+    // match basis for the derived-doc sweep (deterministic coverage check,
+    // no BM25 ranking noise).
+    const suppressedWords = new Set<string>();
 
     const runPass = async (): Promise<number> => {
       const seen = new Set<string>();
@@ -274,6 +306,7 @@ export class ForgetService {
             continue;
           }
           pairs.push({ threadId: hit.threadId, messageId: hit.messageId });
+          for (const w of contentWords(hit.content ?? '')) suppressedWords.add(w);
         }
       }
       for (const pair of pairs) {
@@ -292,6 +325,44 @@ export class ForgetService {
     for (let round = 0; round < RESIDUAL_MAX_ROUNDS; round += 1) {
       const found = await runPass();
       if (found === 0) break;
+    }
+
+    // Derived-representation sweep (content-exact): consolidated inferences
+    // and session summaries written BEFORE the forget restate the forgotten
+    // facts. A doc is deleted ONLY when its own substantive content is (nearly)
+    // fully covered by the suppressed passages' content words — a doc mixing
+    // forgotten and preserved facts stays (conservative; partial FE residue
+    // beats collateral PR damage, the lite5b lesson). The candidate set comes
+    // from listing non-thread docs, NOT from BM25 probe matching — so probe
+    // vagueness can never widen the blast radius.
+    if (this.services.listNonThreadDocs) {
+      // Seed words: suppressed passage content; when no message matched
+      // (docs-only residue), fall back to the request targets themselves.
+      const seed =
+        suppressedWords.size > 0
+          ? suppressedWords
+          : new Set<string>((request.targets ?? []).flatMap((t) => contentWords(t)));
+      if (seed.size > 0) {
+        const rows = await this.services.listNonThreadDocs();
+        const sweptAnchors: string[] = [];
+        for (const row of rows) {
+          if (sweptAnchors.includes(row.anchor)) continue;
+          if (!row.summary || row.summary.length < 20) continue;
+          const docWords = [...contentWords(row.summary)];
+          if (docWords.length === 0) continue;
+          const covered = docWords.filter((w) => seed.has(w)).length;
+          if (covered / docWords.length >= DERIVED_DOC_COVERAGE_THRESHOLD) {
+            await this.services.store.deleteByAnchor(row.anchor);
+            sweptAnchors.push(row.anchor);
+            details.push({ anchor: row.anchor, kind: 'derived-doc', method: 'index' });
+            removed += 1;
+          }
+        }
+        if (sweptAnchors.length > 0) {
+          await this.services.dropEdgesForAnchors?.(sweptAnchors);
+          await this.services.clearConsumptionSignals?.(sweptAnchors);
+        }
+      }
     }
 
     // Remaining check: any passage still matching?
