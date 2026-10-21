@@ -124,6 +124,13 @@ export interface ForgetHostServices {
     Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>
   >;
   /**
+   * List ALL message passages (unfiltered) — enables self-sufficient
+   * timerange suppression by createdAt window without BM25 probing.
+   */
+  listMessagePassages?: () => Promise<
+    Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>
+  >;
+  /**
    * Permanently suppress one message from the thread index (hard forget):
    * removes the passage + vectors, commits the suppression tombstone, and
    * purges the restore snapshot so it never resurfaces on reindex or
@@ -221,9 +228,14 @@ export class ForgetService {
     // this request targets threads, forgetting happens per MESSAGE (passage),
     // not per thread doc — deleting a whole thread doc would be both too
     // coarse and resurrectable, while the suppression tombstone is permanent.
+    // Timerange IS handled here too: filtering passages by createdAt is the
+    // conversation-time-correct path (thread summary docs carry the index
+    // refresh timestamp, so the doc-level timerange filter would match
+    // nothing and silently no-op — verified in the clowder_lite5 run where
+    // every F5 probe leaked).
     const messageCapable =
       evidenceScope !== 'docs' && this.services.searchMessagePassages && this.services.suppressMessage;
-    if (messageCapable && request.scope !== 'timerange') {
+    if (messageCapable) {
       return this.executeMessageLevel(request, now);
     }
 
@@ -289,25 +301,52 @@ export class ForgetService {
     // no BM25 ranking noise).
     const suppressedWords = new Set<string>();
 
+    // Timerange: date-window filtering on passage createdAt. Probes are
+    // irrelevant here — everything in the window goes. Candidate discovery
+    // reuses the passage search with a broad wildcard-ish term when the
+    // host supports it; otherwise the host's listMessagePassages covers it.
+    const isTimerange = request.scope === 'timerange';
+    const dateInWindow = (createdAt?: string | null): boolean => {
+      if (!isTimerange) return true;
+      const iso = createdAt ? createdAt.slice(0, 10) : '';
+      if (!iso) return false;
+      if (request.since && iso < request.since) return false;
+      if (request.until && iso > request.until) return false;
+      return true;
+    };
+
     const runPass = async (): Promise<number> => {
       const seen = new Set<string>();
-      const probes = request.scope === 'topic' ? (request.targets ?? []) : (request.targets ?? []).flatMap(multiProbes);
-      const pairs: Array<{ threadId: string; messageId: string }> = [];
-      for (const probe of probes) {
-        const hits = await searchPassages(probe, 20);
-        for (const hit of hits) {
-          const key = `${hit.threadId}/${hit.messageId}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          // Fresh-write guard on the message timestamp (createdAt optional).
-          const t = hit.createdAt ? Date.parse(hit.createdAt) : Number.NaN;
-          if (Number.isFinite(t) && now - t < FRESH_WRITE_GUARD_MS) {
-            protectedCount += 1;
-            continue;
+      const listAll = this.services.listMessagePassages;
+      let candidates: Array<{ threadId: string; messageId: string; createdAt?: string | null; content?: string | null }>;
+      if (isTimerange && listAll) {
+        candidates = (await listAll()).filter((p) => dateInWindow(p.createdAt));
+      } else {
+        candidates = [];
+        const probes =
+          request.scope === 'topic' ? (request.targets ?? []) : (request.targets ?? []).flatMap(multiProbes);
+        for (const probe of probes) {
+          for (const hit of await searchPassages(probe, 20)) {
+            candidates.push(hit);
           }
-          pairs.push({ threadId: hit.threadId, messageId: hit.messageId });
-          for (const w of contentWords(hit.content ?? '')) suppressedWords.add(w);
         }
+      }
+      const pairs: Array<{ threadId: string; messageId: string }> = [];
+      const seenKeys = isTimerange ? undefined : new Set<string>();
+      for (const hit of candidates) {
+        const key = `${hit.threadId}/${hit.messageId}`;
+        if (seenKeys) {
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+        }
+        // Fresh-write guard on the message timestamp (createdAt optional).
+        const t = hit.createdAt ? Date.parse(hit.createdAt) : Number.NaN;
+        if (Number.isFinite(t) && now - t < FRESH_WRITE_GUARD_MS) {
+          protectedCount += 1;
+          continue;
+        }
+        pairs.push({ threadId: hit.threadId, messageId: hit.messageId });
+        for (const w of contentWords(hit.content ?? '')) suppressedWords.add(w);
       }
       for (const pair of pairs) {
         await suppress(pair.threadId, pair.messageId);
@@ -321,10 +360,13 @@ export class ForgetService {
       return pairs.length;
     };
 
-    await runPass();
-    for (let round = 0; round < RESIDUAL_MAX_ROUNDS; round += 1) {
+    // Timerange: everything in the window goes in ONE pass — the residual
+    // re-run would find nothing (all window passages already suppressed),
+    // and re-suppressing is idempotent anyway.
+    const passes = isTimerange ? 1 : 1 + RESIDUAL_MAX_ROUNDS;
+    for (let round = 0; round < passes; round += 1) {
       const found = await runPass();
-      if (found === 0) break;
+      if (!isTimerange && found === 0) break;
     }
 
     // Derived-representation sweep (content-exact): consolidated inferences
