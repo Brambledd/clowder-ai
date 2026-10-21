@@ -14,12 +14,13 @@
 | **精确 anchor / 看关系** | `cat_cafe_graph_resolve(query, depth?, relations?)` | 已知 `F186` / `ADR-019` 等 anchor 看周边引用；或模糊词→候选列表 |
 | **零先验 / 扫一眼最近** | `cat_cafe_list_recent(scope, since, limit?)` | 不知道找什么、"我记得最近讨论过 X" / 压缩后回顾 |
 | **语义 / 模糊找** | `cat_cafe_search_evidence(query, mode?, scope?)` | 有概念/关键词需要语义召回；跨语言搜索 |
+| **遗忘 / 删除记忆** | `cat_cafe_forget_evidence(scope, targets?, since?, until?, replacement?)` | 用户要求"忘掉 / 删除 / 别再记得"某信息；或旧值换新值（带 replacement） |
 
-⚠️ Session hook 已更新为三入口提示（F200）。**按场景选入口**——精确 anchor 走 graph 比 search 命中率高得多；零先验扫一眼用 recent 比反复盲搜 query 高效。
+⚠️ Session hook 已更新为三入口提示（F200）。**按场景选入口**——精确 anchor 走 graph 比 search 命中率高得多；零先验扫一眼用 recent 比反复盲搜 query 高效；用户明确要求遗忘时走 forget（唯一写入口，默认只作用于对话记忆 threads，删除项目知识 docs 需显式 evidenceScope 并先与用户确认）。
 
-## Clowder AI 7-tool memory family（cross-reference）
+## Clowder AI 8-tool memory family（cross-reference）
 
-每个工具的 MCP description 都互相 cross-reference 这 7 个：
+每个工具的 MCP description 都互相 cross-reference 这 8 个：
 
 1. `search_evidence` — semantic / fuzzy find（lexical/semantic/hybrid）
 2. `graph_resolve` — precise anchor / relations（沿边走）
@@ -28,6 +29,7 @@
 5. `read_session_digest` — 看会话摘要
 6. `read_session_events` — 看会话事件
 7. `read_invocation_detail` — 看单次 invocation 全事件
+8. `forget_evidence` — targeted unlearning（唯一写入口；物理删除 + 残留验证 + 可选替换）
 
 猫的认知成本主要来自"工具间互相找"而非"工具总数"——cross-reference 是缓解膨胀的解药（4.6 review #3 收敛）。
 

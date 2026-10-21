@@ -169,6 +169,11 @@ export {
   readFileSliceInputSchema,
 } from './file-tools.js';
 export {
+  forgetEvidenceInputSchema,
+  forgetTools,
+  handleForgetEvidence,
+} from './forget-tools.js';
+export {
   createFinanceQueryHandler,
   financeQueryInputSchema,
   financeTools,

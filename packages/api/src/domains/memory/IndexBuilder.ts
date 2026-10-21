@@ -292,17 +292,24 @@ export class IndexBuilder implements IIndexBuilder {
 
   private async discover(): Promise<import('./interfaces.js').ScannedEvidence[]> {
     await access(this.scanRoot);
+    let items: import('./interfaces.js').ScannedEvidence[];
     if (this.scanner instanceof CatCafeScanner || this.scanner instanceof GenericRepoScanner) {
-      return runMemoryScan({
+      items = await runMemoryScan({
         kind: 'scan',
         scanner: this.scanner instanceof CatCafeScanner ? 'cat-cafe' : 'generic',
         root: this.scanRoot,
         excludes: this.scanner instanceof CatCafeScanner ? this.scanner.getExcludePatterns() : undefined,
         options: this.buildScanOptions(),
       });
+    } else {
+      await yieldToIo();
+      items = await this.scanner.discover(this.scanRoot, this.buildScanOptions());
     }
-    await yieldToIo();
-    return this.scanner.discover(this.scanRoot, this.buildScanOptions());
+    // Targeted unlearning: status:deleted files are tombstoned — the file is
+    // preserved for audit but must never re-enter the index. Filtering here
+    // covers the full-rebuild path AND makes orphan cleanup drop any stale
+    // rows (deleted anchors are absent from currentAnchors).
+    return items.filter((scanned) => scanned.item.status !== 'deleted');
   }
 
   private async rebuildOnce(options?: {
@@ -960,6 +967,9 @@ export class IndexBuilder implements IIndexBuilder {
             })
           : this.scanner.parseSingle(filePath, this.scanRoot);
       if (!scanned) return null;
+      // Targeted unlearning: a file whose frontmatter was rewritten to
+      // status:deleted must route into the deletion pass, not the upsert.
+      if (scanned.item.status === 'deleted') return null;
       const sourceHash = scanned.rawContent
         ? createHash('sha256').update(scanned.rawContent).digest('hex').slice(0, 16)
         : undefined;

@@ -57,7 +57,8 @@ export type EvidenceStatus =
   | 'drifted'
   | 'stale'
   | 'historical'
-  | 'retired';
+  | 'retired'
+  | 'deleted';
 
 // ── F152 Phase A: Provenance + Scanner types ────────────────────────
 
@@ -406,6 +407,10 @@ export interface IEvidenceStore {
   resolveEntityAliases?(query: string): Promise<QueryEntityMatch[]>;
   refreshEntityMentions?(docAnchors?: string[]): Promise<void>;
   deleteByAnchor(anchor: string): Promise<void>;
+  /** Targeted unlearning: list entries whose updatedAt falls in [since, until]
+   *  (ISO YYYY-MM-DD bounds, inclusive). Enables self-sufficient timerange
+   *  forget without a caller-fed target list. */
+  listByDateRange?(since: string, until: string): Promise<EvidenceItem[]>;
   getByAnchor(anchor: string): Promise<EvidenceItem | null>;
   health(): Promise<boolean>;
   initialize(): Promise<void>;

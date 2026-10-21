@@ -2008,6 +2008,45 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     });
   }
 
+  /**
+   * Targeted unlearning cascade: drop every graph edge touching any of the
+   * given anchors (both as source and target). Chunked the same way as
+   * removeBySourcePrefix so large forget batches stay within SQLite's
+   * variable limit.
+   */
+  async deleteEdgesForAnchors(anchors: string[]): Promise<void> {
+    if (anchors.length === 0) return;
+    return this.writeQueue.enqueue(() => {
+      this.ensureOpen();
+      const db = this.getDb();
+      const CHUNK = 400;
+      for (let i = 0; i < anchors.length; i += CHUNK) {
+        const batch = anchors.slice(i, i + CHUNK);
+        const ph = batch.map(() => '?').join(',');
+        db.prepare(`DELETE FROM edges WHERE from_anchor IN (${ph}) OR to_anchor IN (${ph})`).run(...batch, ...batch);
+      }
+    });
+  }
+
+  /**
+   * Targeted unlearning: self-sufficient timerange forget. updatedAt is
+   * stored as an ISO string, so a plain lexicographic BETWEEN on the first
+   * 10 characters (the YYYY-MM-DD date part) is exact.
+   */
+  async listByDateRange(since: string, until: string): Promise<EvidenceItem[]> {
+    this.ensureOpen();
+    const db = this.getDb();
+    const rows = db
+      .prepare('SELECT anchor FROM evidence_docs WHERE substr(updated_at, 1, 10) BETWEEN ? AND ? ORDER BY anchor')
+      .all(since, until) as Array<{ anchor: string }>;
+    const items: EvidenceItem[] = [];
+    for (const row of rows) {
+      const item = await this.getByAnchor(row.anchor);
+      if (item) items.push(item);
+    }
+    return items;
+  }
+
   // ── Passage operations ─────────────────────────────────────────────
 
   /** Search passage_fts and return matching passages with doc context. */

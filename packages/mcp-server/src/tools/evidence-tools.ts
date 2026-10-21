@@ -791,11 +791,12 @@ export const evidenceTools = [
       'RANKING (F200 live): Results are consumption-weighted — docs that cats actually read/used after searching rank higher. Constitutional docs (ADR/lesson/canon) never get demoted. New docs have 14-day grace period. Near-duplicates are MMR-deduplicated for diversity. No action needed — ranking is automatic. ' +
       'DEPTH: Start with summary (default). Use depth=raw only after narrowing scope to drill into specific passages. ' +
       'BOUNDARY: Use this tool to FIND information across the project. For READING raw messages in a specific thread, use get_thread_context instead. ' +
-      'F188 PHASE F 7-TOOL FAMILY (cross-reference, choose by scenario): ' +
+      'F188 PHASE F 8-TOOL FAMILY (cross-reference, choose by scenario): ' +
       'precise anchor + relations → cat_cafe_graph_resolve; ' +
       'zero-prior / scan recent → cat_cafe_list_recent; ' +
       'this tool (search_evidence) = semantic/fuzzy find; ' +
-      'session drill-down → list_session_chain / read_session_digest / read_session_events / read_invocation_detail. ' +
+      'session drill-down → list_session_chain / read_session_digest / read_session_events / read_invocation_detail; ' +
+      'forget/delete memory → cat_cafe_forget_evidence (the only write tool). ' +
       'When this tool returns no results or only low match-rank hits, payload appends a deterministic nudge pointing to graph_resolve/list_recent (KD-7).',
     operation: {
       kind: 'single',

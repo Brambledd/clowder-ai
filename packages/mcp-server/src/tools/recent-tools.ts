@@ -180,11 +180,12 @@ function formatRecent(data: RecentResponse, since: string): string {
 
 function crossReferenceFooter(): string {
   return [
-    '— Clowder AI 7-tool memory family —',
+    '— Clowder AI 8-tool memory family —',
     '  search_evidence: semantic / fuzzy find (lexical/semantic/hybrid)',
     '  graph_resolve: precise anchor / relations',
     '  list_recent: zero-prior / scan recent (this tool)',
     '  list_session_chain / read_session_digest / read_session_events / read_invocation_detail: drill into history',
+    '  forget_evidence: targeted unlearning (forget/delete memory)',
   ].join('\n');
 }
 

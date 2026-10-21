@@ -14,6 +14,7 @@ const VALID_EVIDENCE_STATUSES = new Set<EvidenceStatus>([
   'stale',
   'historical',
   'retired',
+  'deleted',
 ]);
 const EMPTY_FRONTMATTER_REFS = new Set(['null', '~', '[]']);
 

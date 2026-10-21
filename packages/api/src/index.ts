@@ -6591,6 +6591,46 @@ async function main(): Promise<void> {
     // F188 Phase K: enable docs_root_suspicious detector in /api/evidence/status.
     ...(memoryServices.catalog ? { catalog: memoryServices.catalog } : {}),
   });
+  // Targeted unlearning: cat_cafe_forget_evidence backing route. The store's
+  // deleteByAnchor already cascades passages + vectors; edges need the batch
+  // method below, and file-sourced docs get their frontmatter retired.
+  const { evidenceForgetRoutes } = await import('./routes/evidence-forget.js');
+  const { ForgetService, retireSourceFileImpl } = await import('./domains/memory/forget/ForgetService.js');
+  const { SqliteEvidenceStore } = await import('./domains/memory/SqliteEvidenceStore.js');
+  const forgetStore = memoryServices.evidenceStore;
+  const forgetService = new ForgetService({
+    store: forgetStore,
+    dropEdgesForAnchors: async (anchors) => {
+      if (forgetStore instanceof SqliteEvidenceStore) {
+        await forgetStore.deleteEdgesForAnchors(anchors);
+      }
+      for (const anchor of anchors) {
+        memoryServices.embeddingLifecycle.getVectorStore()?.delete(anchor);
+      }
+    },
+    retireSourceFile: retireSourceFileImpl,
+    // Threads scope: message-level hard forget via the existing suppression
+    // machinery (passage + vectors removed, tombstone committed, restore
+    // snapshot purged — nothing resurfaces on reindex or restart).
+    searchMessagePassages: async (query, limit) => {
+      if (!(forgetStore instanceof SqliteEvidenceStore)) return [];
+      const hits = forgetStore.searchPassages(query, limit ?? 20);
+      return hits
+        .map((h) => ({
+          threadId: h.docAnchor.startsWith('thread-') ? h.docAnchor.slice('thread-'.length) : '',
+          messageId: h.passageId.startsWith('msg-') ? h.passageId.slice('msg-'.length) : '',
+          createdAt: h.createdAt ?? null,
+        }))
+        .filter((p) => p.threadId !== '' && p.messageId !== '');
+    },
+    suppressMessage: async (threadId, messageId) => {
+      const indexBuilder = memoryServices.indexBuilder;
+      if (!indexBuilder) return;
+      const lease = await indexBuilder.suppressMessagePassage(threadId, messageId);
+      await indexBuilder.finalizeMessagePassageSuppression(lease);
+    },
+  });
+  await app.register(evidenceForgetRoutes, { forgetService });
   // F227: Event Memory query route (GET /api/memory/events)
   await app.register(eventsRoutes, {
     eventMemoryStore: memoryServices.eventMemoryStore,
