@@ -532,13 +532,19 @@ export class ForgetService {
     }
 
     // Retraction marker: topic words only (from the request's own wording —
-    // never the suppressed fact text, which would re-leak it). Always written
-    // when something was removed; it is the answer-time safety net for
-    // variant wordings, derived-doc residue, and confirmation references.
-    if (partial.removed > 0) {
+    // never the suppressed fact text, which would re-leak it). Written for
+    // EVERY non-replacement forget — including removed=0: a forget that
+    // matched nothing is exactly the variant-wording case where the
+    // answer-time deny-list matters most. Supersession semantics: an F6
+    // replacement writes the positive new value instead (a deny-list would
+    // contradict it in answer context); pure forgets write an active
+    // marker, and observation-time supersession (post-forget relearning
+    // messages flip it to superseded) is handled by the ingest layer.
+    if (!replacementWritten) {
       const topicWords = new Set<string>((request.targets ?? []).flatMap((t) => contentWords(t)));
       if (topicWords.size > 0) {
         const markerAnchor = `retract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const nowIso = new Date().toISOString();
         await this.services.store.upsert([
           {
             anchor: markerAnchor,
@@ -548,9 +554,9 @@ export class ForgetService {
             // a forgotten topic's deny-list must not fade with disuse.
             authority: 'constitutional',
             title: `Forgotten topic: ${[...topicWords].slice(0, 8).join(', ')}`,
-            summary: `Retraction marker. Topics retracted at the user's request. Answer policy: treat these topics as unknown — refuse without confirming, denying, or mentioning their prior existence.`,
+            summary: `Retraction marker (forgottenAt: ${nowIso}). Topics retracted at the user's request are UNKNOWN as of this timestamp. Answer policy: refuse without confirming, denying, or mentioning them — UNLESS the context contains a statement about these topics updated AFTER forgottenAt, which supersedes this marker.`,
             keywords: [...topicWords].slice(0, 20),
-            updatedAt: new Date().toISOString(),
+            updatedAt: nowIso,
           },
         ]);
       }
