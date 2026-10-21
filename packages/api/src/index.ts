@@ -6620,14 +6620,56 @@ async function main(): Promise<void> {
           threadId: h.docAnchor.startsWith('thread-') ? h.docAnchor.slice('thread-'.length) : '',
           messageId: h.passageId.startsWith('msg-') ? h.passageId.slice('msg-'.length) : '',
           createdAt: h.createdAt ?? null,
+          content: h.content ?? null,
         }))
         .filter((p) => p.threadId !== '' && p.messageId !== '');
+    },
+    listMessagePassages: async () => {
+      if (!(forgetStore instanceof SqliteEvidenceStore)) return [];
+      const rows = forgetStore
+        .getDb()
+        .prepare(
+          "SELECT doc_anchor, passage_id, created_at, content FROM evidence_passages WHERE doc_anchor LIKE 'thread-%'",
+        )
+        .all() as Array<{ doc_anchor: string; passage_id: string; created_at: string | null; content: string | null }>;
+      return rows
+        .filter((r) => r.passage_id.startsWith('msg-'))
+        .map((r) => ({
+          threadId: r.doc_anchor.slice('thread-'.length),
+          messageId: r.passage_id.slice('msg-'.length),
+          createdAt: r.created_at ?? null,
+          content: r.content ?? null,
+        }));
     },
     suppressMessage: async (threadId, messageId) => {
       const indexBuilder = memoryServices.indexBuilder;
       if (!indexBuilder) return;
       const lease = await indexBuilder.suppressMessagePassage(threadId, messageId);
       await indexBuilder.finalizeMessagePassageSuppression(lease);
+    },
+    listNonThreadDocs: async () => {
+      if (!(forgetStore instanceof SqliteEvidenceStore)) return [];
+      return forgetStore
+        .getDb()
+        .prepare("SELECT anchor, kind, summary FROM evidence_docs WHERE anchor NOT LIKE 'thread-%' ORDER BY anchor")
+        .all() as Array<{ anchor: string; kind?: string; summary: string | null }>;
+    },
+    listThreadSummaries: async () => {
+      if (!(forgetStore instanceof SqliteEvidenceStore)) return [];
+      return forgetStore
+        .getDb()
+        .prepare("SELECT anchor, summary FROM evidence_docs WHERE anchor LIKE 'thread-%' ORDER BY anchor")
+        .all() as Array<{ anchor: string; summary: string | null }>;
+    },
+    blankThreadSummary: async (anchor) => {
+      if (forgetStore instanceof SqliteEvidenceStore) {
+        await forgetStore.runExclusive(() => {
+          forgetStore
+            .getDb()
+            .prepare('UPDATE evidence_docs SET summary = ? WHERE anchor = ?')
+            .run('', anchor);
+        });
+      }
     },
   });
   await app.register(evidenceForgetRoutes, { forgetService });

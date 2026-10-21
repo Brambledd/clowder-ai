@@ -24,6 +24,7 @@ const KIND_TO_DIR: Omit<Record<EvidenceKind, string>, 'diary'> = {
   thread: 'evidence',
   discussion: 'discussions',
   research: 'research',
+  retraction: 'evidence',
   'pack-knowledge': 'pack-knowledge',
 };
 

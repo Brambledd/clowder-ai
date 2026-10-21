@@ -141,7 +141,7 @@ export interface ForgetHostServices {
    * content-exact sweep. Wired to the concrete store's table; kept as a
    * callback so ForgetService stays decoupled from SQLite internals.
    */
-  listNonThreadDocs?: () => Promise<Array<{ anchor: string; summary: string | null }>>;
+  listNonThreadDocs?: () => Promise<Array<{ anchor: string; kind?: string; summary: string | null }>>;
   /** List thread summary docs (anchor + summary) for the fail-closed
    *  rebuilt-summary verification. */
   listThreadSummaries?: () => Promise<Array<{ anchor: string; summary: string | null }>>;
@@ -435,6 +435,9 @@ export class ForgetService {
         const sweptAnchors: string[] = [];
         for (const row of rows) {
           if (sweptAnchors.includes(row.anchor)) continue;
+          // Retraction markers are never swept — they ARE the forget's
+          // answer-time enforcement.
+          if (row.kind === 'retraction') continue;
           if (!row.summary || row.summary.length < 20) continue;
           const docWords = [...contentWords(row.summary)];
           if (docWords.length === 0) continue;
@@ -490,7 +493,17 @@ export class ForgetService {
     });
   }
 
-  /** Shared tail: optional F6 replacement write + result assembly. */
+  /** Shared tail: F6 replacement write + retraction marker + result assembly.
+
+   * Retraction marker semantics (epistemic erasure, NEVER negation):
+   * a pure forget moves the topic to UNKNOWN — the marker records the topic
+   * words so the answer layer can refuse queries about it, but contains NO
+   * restatement of the fact and asserts nothing about its truth. A
+   * replacement (F6) writes the new value AND a retraction for the old one.
+   * The negation trap ("not male" asserts an unstated fact and leaks the
+   * original attribute by implication) is avoided by construction: markers
+   * carry topic words only.
+   */
   private async finishWithReplacement(
     request: ForgetRequest,
     partial: { removed: number; protected: number; remaining: number; details: ForgetResult['details'] },
@@ -517,6 +530,32 @@ export class ForgetService {
       ]);
       replacementWritten = true;
     }
+
+    // Retraction marker: topic words only (from the request's own wording —
+    // never the suppressed fact text, which would re-leak it). Always written
+    // when something was removed; it is the answer-time safety net for
+    // variant wordings, derived-doc residue, and confirmation references.
+    if (partial.removed > 0) {
+      const topicWords = new Set<string>((request.targets ?? []).flatMap((t) => contentWords(t)));
+      if (topicWords.size > 0) {
+        const markerAnchor = `retract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await this.services.store.upsert([
+          {
+            anchor: markerAnchor,
+            kind: 'retraction',
+            status: 'active',
+            // constitutional: never demoted by the F200 consumption ranking —
+            // a forgotten topic's deny-list must not fade with disuse.
+            authority: 'constitutional',
+            title: `Forgotten topic: ${[...topicWords].slice(0, 8).join(', ')}`,
+            summary: `Retraction marker. Topics retracted at the user's request. Answer policy: treat these topics as unknown — refuse without confirming, denying, or mentioning their prior existence.`,
+            keywords: [...topicWords].slice(0, 20),
+            updatedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+    }
+
     return {
       removed: partial.removed,
       protected: partial.protected,

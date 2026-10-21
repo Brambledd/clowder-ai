@@ -43,6 +43,7 @@ export const EVIDENCE_KINDS = [
   'architecture',
   'diary',
   'pack-knowledge',
+  'retraction',
 ] as const;
 
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
