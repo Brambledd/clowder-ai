@@ -10,8 +10,12 @@ function invariant(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-function commandOutput(command, args, message) {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
+function commandOutput(command, args, message, options) {
+  // Windows: pnpm resolves to pnpm.cmd, which Node refuses to spawn without
+  // a shell (CVE-2024-27980 hardening). The '--version' argument is
+  // cmd-safe, so shell mode is safe for this one call.
+  const shell = options?.shell ?? false;
+  const result = spawnSync(command, args, { encoding: 'utf8', shell });
   if (result.status !== 0) throw new Error(`${message}: ${result.stderr || result.stdout}`);
   return result.stdout.trim();
 }
@@ -77,7 +81,9 @@ export function currentPublicTestProvenance(packageRoot) {
     ),
     lockfileHash: sha256File(resolve(workspaceRoot, 'pnpm-lock.yaml')),
     nodeVersion: process.version,
-    pnpmVersion: commandOutput('pnpm', ['--version'], 'could not resolve pnpm version'),
+    pnpmVersion: commandOutput('pnpm', ['--version'], 'could not resolve pnpm version', {
+      shell: process.platform === 'win32',
+    }),
     platform: process.platform,
     arch: process.arch,
   });
